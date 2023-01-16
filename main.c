@@ -4,16 +4,22 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <errno.h>
+#include <syslog.h>
+
 
 #define Address struct sockaddr_in
 #define HASH_TABLE_SIZE 10
+#define	MAXFD	64
 
 typedef struct HTTP_Server {
     int socket;
     int port;
+    int socketfd;
 } HTTP_Server;
 
 struct MapNode {
@@ -36,7 +42,9 @@ void map_set(struct Map *map, char *key, char *value);
 
 char * renderFile(char * fileName);
 
-int main(){
+int daemon_init(const char *pname, int facility, uid_t uid, int socket);
+
+int main(int argc, char **argv){
     HTTP_Server Server;
     struct Map map;
     int connfd;
@@ -48,6 +56,10 @@ int main(){
     map_set(&map, "/authors", "authors.html");
     map_set(&map, "/contact", "contact.html");
     map_set(&map, "/about", "about.html");
+
+    daemon_init(argv[0],LOG_USER, 1000, Server.socketfd);
+	  syslog (LOG_NOTICE, "Program started by User %d", getuid());
+	  syslog (LOG_INFO,"Waiting for clients ... ");
 
 
     while(1){
@@ -63,8 +75,6 @@ int main(){
 
         connfd = accept(Server.socket, NULL, NULL);
         read(connfd, clientMsg, 4095);
-
-        printf("hello world");
 
         clientHeader = strtok(clientMsg, "\n");
         headerToken = strtok(clientHeader, " ");
@@ -94,14 +104,14 @@ int main(){
         }
 
         responseData = renderFile(template);
-        printf("\n%s", responseData);
 
         strcat(responseHeader, responseData);
         strcat(responseHeader, "\r\n\r\n");
+        printf("\n\n\n%s", responseHeader);
+        free(responseData);
 
         send(connfd, responseHeader, sizeof(responseHeader),0);
         close(connfd);
-        free(responseData);
     }
 
     return 0;
@@ -111,6 +121,7 @@ void initServer(HTTP_Server * server, int port){
     server->port = port;
     
     int socketFD = socket(AF_INET, SOCK_STREAM, 0);
+    server->socketfd=socketFD;
     if(socketFD < 0 ){
         printf("Socket error");
     }
@@ -120,7 +131,7 @@ void initServer(HTTP_Server * server, int port){
     servAddr.sin_port = htons(port);
     servAddr.sin_addr.s_addr = INADDR_ANY;
 
-    if(bind(socketFD, (const Address *) &servAddr, sizeof servAddr) < 0){
+    if(bind(socketFD, (struct sockaddr *) &servAddr, sizeof servAddr) < 0){
         printf("Bind error");
     }
 
@@ -206,4 +217,48 @@ char * renderFile(char * fileName){
 
     fclose(fileDesc);
     return file;
+}
+
+int daemon_init(const char *pname, int facility, uid_t uid, int socket) {
+	int		i, p;
+	pid_t	pid;
+
+	if ( (pid = fork()) < 0)
+		return (-1);
+	else if (pid)
+		exit(0);			/* parent terminates */
+
+	/* child 1 continues... */
+
+	if (setsid() < 0)			/* become session leader */
+		return (-1);
+
+	signal(SIGHUP, SIG_IGN);
+	if ( (pid = fork()) < 0)
+		return (-1);
+	else if (pid)
+		exit(0);			/* child 1 terminates */
+
+	/* child 2 continues... */
+
+//	chdir("/tmp");				/* change working directory  or chroot()*/
+	chroot("/tmp");
+
+	/* close off file descriptors */
+	for (i = 0; i < MAXFD; i++){
+		if(socket != i )
+			close(i);
+	}
+
+	/* redirect stdin, stdout, and stderr to /dev/null */
+	p= open("/dev/null", O_RDONLY);
+	open("/dev/null", O_RDWR);
+	open("/dev/null", O_RDWR);
+
+	openlog("httpServ", LOG_PID, facility);
+	
+        syslog(LOG_ERR," STDIN =   %i\n", p);
+	setuid(uid); /* change user */
+	
+	return (0);				/* success */
 }
